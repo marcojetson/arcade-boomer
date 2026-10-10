@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""GAME_TITLE — a Batocera / pygame game.
+
+Starting point for Batocera pygame games: a tiny but complete one-button runner (jump over
+blocks, START to play) that already has everything a cabinet needs — screen fitting, GPU
+scaling, controller / joystick / keyboard-encoder input with duplicate-press filtering,
+looping music on a reserved channel, optional sound effects, JSON saves, a pixel font.
+Replace the "Game" section with the real game; keep the rest.
+
+Desktop test:   python3 <game>.pygame --windowed
+Headless test:  python3 <skill>/scripts/headless_test.py <game>.pygame --out /tmp/shots
+The harness relies on: update(dt), render(), screen, Controls, start_game(), current_screen,
+TITLE / PLAYING / GAME_OVER and SAVE_FILE.
+"""
+import json
+import os
+import random
+import sys
+from functools import lru_cache
+
+import pygame
+
+GAME_DIR = os.path.dirname(os.path.abspath(__file__))  # launch directory isn't guaranteed
+GAME_SLUG = os.path.splitext(os.path.basename(__file__))[0]
+SAVE_FILE = os.path.join(GAME_DIR, GAME_SLUG + '-save.json')
+
+# ===== Tuning ============================================================
+GRAVITY = 900
+JUMP_FORCE = 300
+START_SPEED = 90
+SPEED_INCREMENT = 3
+RESTART_DELAY = 0.6
+
+# ===== Screen ============================================================
+SCREEN_WIDTH = 256                    # fixed: gameplay is identical on every screen
+MIN_SCREEN_HEIGHT, MAX_SCREEN_HEIGHT = 144, 200
+GROUND_Y = 120                        # world coordinates; extra screen height is added below
+IS_WINDOWED = '--windowed' in sys.argv
+
+COLOR = {
+    'sky': (40, 44, 80), 'ground': (90, 60, 40), 'player': (240, 200, 80), 'block': (200, 70, 70),
+    'text': (255, 243, 214), 'text_shadow': (20, 10, 30), 'night': (10, 8, 20), 'gold': (252, 196, 25),
+}
+CONTROL_LABEL = {'start': 'PRESS START', 'jump': 'A'}
+
+
+# ===== Helpers ===========================================================
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def now_ms():
+    return pygame.time.get_ticks()
+
+
+def is_blink_on(period_ms):
+    return (now_ms() // period_ms) % 2 == 0
+
+
+def load_save():
+    try:
+        with open(SAVE_FILE) as file:
+            return json.load(file)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_save(data):
+    try:
+        with open(SAVE_FILE, 'w') as file:
+            json.dump(data, file)
+    except OSError:
+        pass  # read-only share: progress just isn't saved
+
+
+# ===== Display ===========================================================
+def mixer_is_available():
+    try:
+        return pygame.mixer.get_init() is not None
+    except (NotImplementedError, pygame.error):
+        return False  # pygame built without SDL_mixer: run silently
+
+
+try:
+    pygame.mixer.pre_init(22050, -16, 1, 512)
+except NotImplementedError:
+    pass
+pygame.init()
+pygame.display.set_caption('GAME_TITLE')
+
+desktop = pygame.display.Info()  # must be read before set_mode
+if IS_WINDOWED or not desktop.current_w:
+    screen_height = MIN_SCREEN_HEIGHT
+else:
+    screen_height = clamp(round(SCREEN_WIDTH * desktop.current_h / desktop.current_w), MIN_SCREEN_HEIGHT, MAX_SCREEN_HEIGHT)
+
+
+def open_display():
+    """SCALED lets SDL upscale the small surface on the GPU — essential for speed on a Pi."""
+    size = (SCREEN_WIDTH, screen_height)
+    flags = pygame.SCALED | (0 if IS_WINDOWED else pygame.FULLSCREEN)
+    for attempt in ({'flags': flags, 'vsync': 1}, {'flags': flags}, {}):
+        try:
+            return pygame.display.set_mode(size, **attempt)
+        except (pygame.error, TypeError):
+            continue
+    raise SystemExit('could not open a display')
+
+
+screen = open_display()
+pygame.mouse.set_visible(False)
+
+
+# ===== Pixel font (3x5, cached per string) ===============================
+PIXEL_FONT = {
+    'A': '.#./#.#/###/#.#/#.#', 'B': '##./#.#/##./#.#/##.', 'C': '.##/#../#../#../.##', 'D': '##./#.#/#.#/#.#/##.',
+    'E': '###/#../##./#../###', 'F': '###/#../##./#../#..', 'G': '.##/#../#.#/#.#/.##', 'H': '#.#/#.#/###/#.#/#.#',
+    'I': '###/.#./.#./.#./###', 'J': '..#/..#/..#/#.#/.#.', 'K': '#.#/#.#/##./#.#/#.#', 'L': '#../#../#../#../###',
+    'M': '#.#/###/###/#.#/#.#', 'N': '##./#.#/#.#/#.#/#.#', 'O': '.#./#.#/#.#/#.#/.#.', 'P': '##./#.#/##./#../#..',
+    'Q': '.#./#.#/#.#/##./.##', 'R': '##./#.#/##./#.#/#.#', 'S': '.##/#../.#./..#/##.', 'T': '###/.#./.#./.#./.#.',
+    'U': '#.#/#.#/#.#/#.#/###', 'V': '#.#/#.#/#.#/#.#/.#.', 'W': '#.#/#.#/###/###/#.#', 'X': '#.#/#.#/.#./#.#/#.#',
+    'Y': '#.#/#.#/.#./.#./.#.', 'Z': '###/..#/.#./#../###', '0': '###/#.#/#.#/#.#/###', '1': '.#./##./.#./.#./###',
+    '2': '##./..#/.#./#../###', '3': '##./..#/.#./..#/##.', '4': '#.#/#.#/###/..#/..#', '5': '###/#../##./..#/##.',
+    '6': '.##/#../###/#.#/###', '7': '###/..#/.#./.#./.#.', '8': '###/#.#/###/#.#/###', '9': '###/#.#/###/..#/##.',
+    ':': '.../.#./.../.#./...', '!': '.#./.#./.#./.../.#.', '.': '.../.../.../.../.#.', '-': '.../.../###/.../...',
+    '/': '..#/..#/.#./#../#..', '?': '##./..#/.#./.../.#.', "'": '.#./.#./.../.../...', '+': '.../.#./###/.#./...',
+}
+GLYPH_PIXELS = {char: [(x, y) for y, row in enumerate(rows.split('/')) for x, cell in enumerate(row) if cell == '#']
+                for char, rows in PIXEL_FONT.items()}
+
+
+def text_width(text, size=1):
+    return len(text) * 4 * size - size
+
+
+@lru_cache(maxsize=512)
+def text_surface(text, size, color, shadow):
+    surface = pygame.Surface((max(1, text_width(text, size) + size), 6 * size), pygame.SRCALPHA)
+    for layer_color, offset in ([(shadow, size)] if shadow else []) + [(color, 0)]:
+        for index, char in enumerate(text):
+            for px, py in GLYPH_PIXELS.get(char, ()):
+                surface.fill(layer_color, (index * 4 * size + px * size + offset, py * size + offset, size, size))
+    return surface
+
+
+def draw_text(text, x, y, size=1, color=COLOR['text'], align='left', shadow=COLOR['text_shadow']):
+    text = str(text).upper()
+    x -= {'center': text_width(text, size) / 2, 'right': text_width(text, size)}.get(align, 0)
+    screen.blit(text_surface(text, size, color, shadow), (round(x), round(y)))
+
+
+# ===== Sound (pre-rendered WAVs in sounds/, all optional) =================
+def load_sounds(names):
+    if not mixer_is_available():
+        return {}
+    pygame.mixer.set_num_channels(16)
+    pygame.mixer.set_reserved(1)  # channel 0 is the music channel
+    loaded = {}
+    for name in names:
+        path = os.path.join(GAME_DIR, 'sounds', name + '.wav')
+        if os.path.exists(path):
+            loaded[name] = pygame.mixer.Sound(path)
+    return loaded
+
+
+sounds = load_sounds(['jump', 'hit', 'music'])
+
+
+def play_sound(name):
+    if name in sounds:
+        sounds[name].play()
+
+
+class Music:
+    """Loops on reserved channel 0. For tempo that follows game speed, render several takes and
+    channel.queue() the next one when get_queue() is None: switches happen at loop ends."""
+
+    def __init__(self):
+        self.channel = pygame.mixer.Channel(0) if mixer_is_available() else None
+
+    def play(self, name):
+        if self.channel and name in sounds:
+            self.channel.play(sounds[name], loops=-1)
+
+    def stop(self, fade_ms=300):
+        if self.channel:
+            self.channel.fadeout(fade_ms)
+
+
+music = Music()
+
+
+# ===== Input =============================================================
+def quit_game():
+    pygame.quit()
+    sys.exit(0)
+
+
+class Controls:
+    """SDL game controllers, raw joysticks and MAME-style keyboard encoders, mapped to actions.
+
+    Batocera can report one physical press twice (e.g. a pad button *and* a mapped key), so a
+    repeat of the same action within SAME_PRESS_WINDOW_MS counts as the same press, and an action
+    is released only when every input holding it has let go."""
+    JUMP_KEYS = {pygame.K_SPACE, pygame.K_UP, pygame.K_w, pygame.K_LCTRL, pygame.K_z}
+    START_KEYS = {pygame.K_RETURN, pygame.K_1}
+    STICK_DEADZONE = 0.6
+    SAME_PRESS_WINDOW_MS = 80
+
+    def __init__(self, on_press, on_release):
+        self.on_press, self.on_release = on_press, on_release
+        self.held_by, self.last_press_ms = {}, {}
+        self.stick_is_up = False
+        self.game_controller_ids = set()
+        self.devices = []
+        self.sdl_controller = self._load_controller_module()
+        self.scan()
+
+    @staticmethod
+    def _load_controller_module():
+        try:
+            from pygame._sdl2 import controller
+            controller.init()
+            return controller
+        except Exception:
+            return None
+
+    def scan(self):
+        pygame.joystick.init()
+        self.devices, self.game_controller_ids = [], set()
+        for index in range(pygame.joystick.get_count()):
+            if self.sdl_controller and self.sdl_controller.is_controller(index):
+                pad = self.sdl_controller.Controller(index)
+                self.game_controller_ids.add(pad.as_joystick().get_instance_id())
+                self.devices.append(pad)
+            else:
+                joystick = pygame.joystick.Joystick(index)
+                joystick.init()
+                self.devices.append(joystick)
+
+    def is_held(self, action):
+        return bool(self.held_by.get(action))
+
+    def press(self, action, source):
+        is_duplicate = now_ms() - self.last_press_ms.get(action, -10_000) < self.SAME_PRESS_WINDOW_MS
+        self.held_by.setdefault(action, set()).add(source)
+        if self.is_held('start') and self.is_held('back'):
+            quit_game()
+        if not is_duplicate:
+            self.last_press_ms[action] = now_ms()
+            self.on_press(action)
+
+    def release(self, action, source):
+        self.held_by.get(action, set()).discard(source)
+        if not self.is_held(action):
+            self.on_release(action)
+
+    def stick_moved(self, vertical_value):
+        if vertical_value < -self.STICK_DEADZONE and not self.stick_is_up:
+            self.stick_is_up = True
+            self.press('jump', 'stick')
+        elif vertical_value > -self.STICK_DEADZONE / 2 and self.stick_is_up:
+            self.stick_is_up = False
+            self.release('jump', 'stick')
+
+    def handle(self, event):
+        if event.type == pygame.QUIT:
+            quit_game()
+        elif event.type in (pygame.KEYDOWN, pygame.KEYUP):
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                quit_game()
+            action = 'jump' if event.key in self.JUMP_KEYS else 'start' if event.key in self.START_KEYS else None
+            if action:
+                (self.press if event.type == pygame.KEYDOWN else self.release)(action, ('key', event.key))
+        elif event.type in (getattr(pygame, 'CONTROLLERBUTTONDOWN', -1), getattr(pygame, 'CONTROLLERBUTTONUP', -1)):
+            action = {pygame.CONTROLLER_BUTTON_A: 'jump', pygame.CONTROLLER_BUTTON_DPAD_UP: 'jump',
+                      pygame.CONTROLLER_BUTTON_START: 'start', pygame.CONTROLLER_BUTTON_BACK: 'back'}.get(event.button)
+            if action:
+                source = ('pad', event.instance_id, event.button)
+                (self.press if event.type == pygame.CONTROLLERBUTTONDOWN else self.release)(action, source)
+        elif event.type == getattr(pygame, 'CONTROLLERAXISMOTION', -1):
+            if event.axis == pygame.CONTROLLER_AXIS_LEFTY:
+                self.stick_moved(event.value / 32767)
+        elif event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP, pygame.JOYAXISMOTION, pygame.JOYHATMOTION):
+            if event.instance_id not in self.game_controller_ids:  # controllers already sent CONTROLLER* events
+                self._handle_raw_joystick(event)
+        elif event.type in (pygame.JOYDEVICEADDED, pygame.JOYDEVICEREMOVED):
+            self.scan()
+
+    def _handle_raw_joystick(self, event):
+        if event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP):
+            action = {0: 'jump', 3: 'jump', 6: 'back', 8: 'back'}.get(event.button)
+            if action is None and event.button >= 7:
+                action = 'start'
+            if action:
+                source = ('joystick', event.instance_id, event.button)
+                (self.press if event.type == pygame.JOYBUTTONDOWN else self.release)(action, source)
+        elif event.type == pygame.JOYAXISMOTION and event.axis == 1:
+            self.stick_moved(event.value)
+        elif event.type == pygame.JOYHATMOTION:
+            self.stick_moved(-event.value[1])
+
+
+# ===== Game ==============================================================
+TITLE, PLAYING, GAME_OVER = 'title', 'playing', 'game_over'
+current_screen = TITLE
+high_score = int(load_save().get('high_score', 0))
+state = {}
+
+
+def start_game():
+    global current_screen
+    current_screen = PLAYING
+    state.clear()
+    state.update(player_y=GROUND_Y, vertical_speed=0.0, on_ground=True, blocks=[], spawn_in=1.0,
+                 speed=START_SPEED, score=0.0, game_over_time=0.0)
+    music.play('music')
+
+
+def end_game():
+    global current_screen, high_score
+    current_screen = GAME_OVER
+    state['game_over_time'] = 0.0
+    play_sound('hit')
+    music.stop()
+    if int(state['score']) > high_score:
+        high_score = int(state['score'])
+        write_save({'high_score': high_score})
+
+
+def on_press(action):
+    if action in ('start', 'jump') and current_screen == TITLE:
+        return start_game()
+    if action in ('start', 'jump') and current_screen == GAME_OVER and state['game_over_time'] > RESTART_DELAY:
+        return start_game()
+    if action == 'jump' and current_screen == PLAYING and state['on_ground']:
+        state['vertical_speed'], state['on_ground'] = -JUMP_FORCE, False
+        play_sound('jump')
+
+
+def on_release(action):
+    if action == 'jump' and current_screen == PLAYING and state['vertical_speed'] < -60:
+        state['vertical_speed'] *= 0.5  # short hop on early release
+
+
+def update(dt):
+    if current_screen == GAME_OVER:
+        state['game_over_time'] += dt
+    if current_screen != PLAYING:
+        return
+    state['speed'] += SPEED_INCREMENT * dt
+    state['score'] += state['speed'] * dt / 10
+    if not state['on_ground']:
+        state['vertical_speed'] += GRAVITY * dt
+        state['player_y'] += state['vertical_speed'] * dt
+        if state['player_y'] >= GROUND_Y:
+            state['player_y'], state['vertical_speed'], state['on_ground'] = GROUND_Y, 0.0, True
+    state['spawn_in'] -= dt
+    if state['spawn_in'] <= 0:
+        state['blocks'].append([SCREEN_WIDTH + 4, random.choice((10, 14, 18))])
+        state['spawn_in'] = random.uniform(0.8, 1.6)
+    for block in state['blocks']:
+        block[0] -= state['speed'] * dt
+    state['blocks'] = [block for block in state['blocks'] if block[0] > -12]
+    player = pygame.Rect(40, round(state['player_y']) - 12, 10, 12)
+    if any(player.colliderect((round(x), GROUND_Y - height, 10, height)) for x, height in state['blocks']):
+        end_game()
+
+
+def render():
+    extra_height = screen_height - MIN_SCREEN_HEIGHT
+    screen.fill(COLOR['sky'])
+    screen.fill(COLOR['ground'], (0, GROUND_Y, SCREEN_WIDTH, MIN_SCREEN_HEIGHT - GROUND_Y + extra_height))
+    if current_screen == TITLE:
+        draw_text('GAME_TITLE', SCREEN_WIDTH / 2, 40, size=3, color=COLOR['gold'], align='center')
+        if is_blink_on(450):
+            draw_text(CONTROL_LABEL['start'], SCREEN_WIDTH / 2, 80, align='center')
+        if high_score:
+            draw_text('HI ' + str(high_score), SCREEN_WIDTH / 2, 92, align='center')
+        return
+    for x, height in state['blocks']:
+        screen.fill(COLOR['block'], (round(x), GROUND_Y - height, 10, height))
+    screen.fill(COLOR['player'], (40, round(state['player_y']) - 12, 10, 12))
+    draw_text('SCORE ' + str(int(state['score'])).zfill(5), 4, 4)
+    draw_text('HI ' + str(high_score).zfill(5), SCREEN_WIDTH - 4, 4, align='right')
+    if current_screen == GAME_OVER:
+        draw_text('GAME OVER', SCREEN_WIDTH / 2, 50, size=2, align='center')
+        if state['game_over_time'] > RESTART_DELAY and is_blink_on(450):
+            draw_text(CONTROL_LABEL['start'] + ' TO RETRY', SCREEN_WIDTH / 2, 76, align='center')
+
+
+# ===== Main loop =========================================================
+def main():
+    controls = Controls(on_press, on_release)
+    clock = pygame.time.Clock()
+    while True:
+        for event in pygame.event.get():
+            controls.handle(event)
+        update(min(1 / 30, clock.tick(60) / 1000))  # clamp dt so a hitch can't teleport things
+        render()
+        pygame.display.flip()
+
+
+if __name__ == '__main__':
+    main()

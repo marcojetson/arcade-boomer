@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+._*
+headless-shots/
+gamelist.backup-*.xml
+*-save.json
