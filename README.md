@@ -10,7 +10,8 @@ through Batocera's built-in **pygame** system.
 
 He's the old-timer you want looking over your shoulder: he knows that HTML games crawl on a Pi,
 that your arcade stick shows up as three different kinds of device, why pressing Start
-sometimes starts *and* pauses the game, and that you never ship `__pycache__` to a cabinet.
+sometimes starts *and* pauses the game, why one joystick can secretly be driving *both*
+players, and that you never ship `__pycache__` to a cabinet.
 
 Born from porting a browser endless-runner to a Batocera arcade cabinet,
 where the HTML version was too slow to play and the pygame version runs well.
@@ -81,6 +82,11 @@ Drop `--dry-run` when it looks right, then run *Update gamelists* in Batocera's 
 | Main button | A, stick or D-pad up | Left Ctrl, Space, Up |
 | Start | Start | 1, Enter |
 | Quit | Batocera's hotkey exit, or Select + Start | Esc |
+
+Keyboard input is ignored entirely while a real pad is connected: many cheap arcade encoders are
+dual-mode and also emit emulated key presses, so trusting both would fire every cabinet input
+twice. For two-player games, ship a small `input.json` beside the game to remap buttons and flip
+axis polarity per player — see `SKILL.md` §4.
 
 ## Requirements
 

@@ -89,21 +89,43 @@ Design for it:
 ## 4. Input: sticks, pads and keyboard encoders
 
 Arcade cabinets arrive as SDL game controllers, raw joysticks, or keyboard encoders
-(MAME layout). Handle all three, mapped to a few *actions* (e.g. jump / fire / start / back):
+(MAME layout). Map raw events to a few *actions* (jump / fire / directions / start / back) and
+keep the mapping in one reconfigurable place so it can change without touching game logic.
 
 - **SDL GameController API** (`from pygame._sdl2 import controller`) gives Batocera's
   configured mapping: A/B/X/Y, START, BACK, D-pad. Use it when `controller.is_controller(i)`.
   Wrap the import in `try` — fall back to raw joysticks if it's missing.
 - **Ignore raw `JOY*` events from devices you opened as controllers** (compare
   `event.instance_id` with `pad.as_joystick().get_instance_id()`), or every press fires twice.
-- **Raw joystick fallback**: button 0 = primary, 1 = secondary, high-numbered buttons
-  (≥ 7) = start, 6/8 = back; hat and axis 1 for up/down.
-- **Keyboard encoders (MAME defaults)**: Left Ctrl = button 1, Left Alt = button 2,
-  `1` / Enter = start, Esc = exit. Also accept Space/arrows for desktop testing.
-- **Batocera can deliver one physical press twice** (e.g. as a pad button *and* as a mapped
-  key). Symptom: "Start begins the game and immediately pauses it". Fix: treat a repeat of
-  the same action within ~80 ms as the same press, and track which inputs hold an action so
-  "release" fires only when all of them let go. The template's `Controls` class does this.
+- **Many cheap "USB gamepad" arcade encoders are dual-mode and also emit keyboard events.**
+  `controller.is_controller(i)` is False for them, so they run through the raw-joystick path —
+  but they *additionally* synthesise key presses: shoving a stick up sends a `JOYAXISMOTION`
+  **and** a `KEYDOWN K_UP`; a face button sends a `JOYBUTTONDOWN` **and** a letter key; START
+  sends a `KEYDOWN K_RETURN`. If your keyboard fallback is mapped to actions, every cabinet
+  input fires twice — and because the emulated keys' axis polarity can differ from the stick's
+  (up emits `K_DOWN`), a stick appears to drive the *other* player in reverse. This is the
+  classic "player 1 moves player 2" bug. **Fix: ignore keyboard events while real joysticks are
+  connected** — `if pygame.joystick.get_count() == 0:` around the key mapping — so the fallback
+  still serves desktops with no pad, but the cabinet is driven only by `JOY*` events.
+- **Don't guess raw button numbers.** Cheap encoders vary wildly. A common D-input pad is
+  X=0, A=1, B=2, Y=3, L=4, R=5, SELECT=8, START=9 (note: **not** the "0 = primary, ≥7 = start"
+  guess); MAME-style encoders differ again. Ship a tiny **`input.json` next to the game**, read
+  at launch, so buttons and axis polarity are remappable without a rebuild — and so a stubborn
+  cabinet can be fixed on the spot:
+
+  ```json
+  {"1": {"invert": "",  "buttons": {"fire": 1, "weapon": 2, "shield": [0, 3], "start": 9, "back": 8}},
+   "2": {"invert": "y", "buttons": {"fire": 1, "weapon": 2, "shield": [0, 3], "start": 9, "back": 8}}}
+  ```
+
+  Keys are 1-based player numbers; `invert` takes `x` and/or `y`; a button may map to a list of
+  indices. `deploy.py` copies it like any other game file. Ignore a missing/malformed file.
+- **Assign players by `event.instance_id`, not device index.** Two identical encoders share the
+  same name *and* USB GUID, so only `instance_id` tells them apart. Build an
+  `instance_id -> player` map when you `scan()` devices.
+- **A physical press can still arrive twice** even from one device. Treat a repeat of the same
+  action within ~80 ms as the same press, and track which inputs hold an action so "release"
+  fires only when all of them let go. The template's `Controls` class does this.
 - **Exit**: Batocera's own hotkey exit closes pygame games like any other system (confirmed on
   a Pi 4), so no extra work is needed. Still support Select+Start (BACK+START held) and Esc →
   `pygame.quit(); sys.exit()` as a fallback for setups without a hotkey configured and for
@@ -176,6 +198,23 @@ python3 -m venv /tmp/pg && /tmp/pg/bin/pip install pygame-ce   # or pygame
   press) and pass them with `--scenario`; see the harness docstring.
 - Look at the screenshots — placeholder rectangles mean sprites didn't load.
 - Run the game windowed on the desktop too: `python3 <game>.pygame --windowed`.
+
+### Diagnosing input you can't see
+
+When the bug only happens on the cabinet, you usually can't watch the screen and can't take it
+over SSH. Ship a throwaway **input-probe game** (a second `<slug>.pygame` in `roms/pygame/`) that
+**writes a log file into the game folder** — readable straight off the share afterwards:
+
+- Log **every** event, not just the ones you expect: `pygame.event.event_name(event.type)` plus
+  `event.dict`, prefixed with `pygame.time.get_ticks()`. The guilty event is often a type you
+  didn't think to log (this is how the dual-mode encoder's emulated `KeyDown` was caught).
+- Also print the device table (`get_name()`, `get_instance_id()`, `is_controller(index)`, USB
+  GUIDs) and your `instance_id -> player` map.
+- Write the **whole buffer at once** on each change rather than appending line by line — `open(...,'a')`
+  writes over an SMB share can arrive out of order, which makes the log lie about what caused what.
+- Ask the user for a *minimal* sequence (one stick, one button at a time) so cross-talk is obvious.
+- Remove the probe's folder **and its gamelist entry** when done — a stale probe is a confusing
+  extra game in the menu.
 
 ## 9. Install on the box
 

@@ -17,7 +17,8 @@ Custom scenario: a .py file defining `run(t)`; `t` provides
     t.game                  the loaded game module
     t.step(seconds, each_frame=None)   advance the game at 60 fps, optionally calling each_frame()
     t.key_down(key) / t.key_up(key) / t.tap(key)        keyboard events through Controls
-    t.joy_down(button) / t.joy_up(button)               raw-joystick events through Controls
+    t.joy_down(button[, instance_id]) / t.joy_up(button[, instance_id])   raw-joystick buttons
+    t.joy_axis(axis, value[, instance_id])              raw-joystick axis motion (e.g. a stick)
     t.shot(name)            save a 3x screenshot
     t.measure(frames=300, each_frame=None)              returns ms per update+render
     t.report                dict printed as JSON at the end
@@ -95,8 +96,9 @@ def build_toolkit(game, out_dir):
         game=game, controls=controls, report=report, step=step, shot=shot, measure=measure, tap=tap,
         key_down=lambda key: send(pygame.KEYDOWN, key=key),
         key_up=lambda key: send(pygame.KEYUP, key=key),
-        joy_down=lambda button: send(pygame.JOYBUTTONDOWN, button=button, instance_id=999, joy=0),
-        joy_up=lambda button: send(pygame.JOYBUTTONUP, button=button, instance_id=999, joy=0),
+        joy_down=lambda button, instance_id=999: send(pygame.JOYBUTTONDOWN, button=button, instance_id=instance_id, joy=0),
+        joy_up=lambda button, instance_id=999: send(pygame.JOYBUTTONUP, button=button, instance_id=instance_id, joy=0),
+        joy_axis=lambda axis, value, instance_id=999: send(pygame.JOYAXISMOTION, axis=axis, value=value, instance_id=instance_id, joy=0),
     )
 
 

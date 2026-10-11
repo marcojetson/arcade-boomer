@@ -201,7 +201,8 @@ class Controls:
 
     Batocera can report one physical press twice (e.g. a pad button *and* a mapped key), so a
     repeat of the same action within SAME_PRESS_WINDOW_MS counts as the same press, and an action
-    is released only when every input holding it has let go."""
+    is released only when every input holding it has let go. Keyboard events are ignored entirely
+    while real joysticks are connected, because cheap encoders also emit emulated key presses."""
     JUMP_KEYS = {pygame.K_SPACE, pygame.K_UP, pygame.K_w, pygame.K_LCTRL, pygame.K_z}
     START_KEYS = {pygame.K_RETURN, pygame.K_1}
     STICK_DEADZONE = 0.6
@@ -269,9 +270,12 @@ class Controls:
         elif event.type in (pygame.KEYDOWN, pygame.KEYUP):
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 quit_game()
-            action = 'jump' if event.key in self.JUMP_KEYS else 'start' if event.key in self.START_KEYS else None
-            if action:
-                (self.press if event.type == pygame.KEYDOWN else self.release)(action, ('key', event.key))
+            # Many arcade encoders are dual-mode: they also emit emulated key presses, which
+            # would double every cabinet input. Trust the keyboard fallback only with no pad.
+            if pygame.joystick.get_count() == 0:
+                action = 'jump' if event.key in self.JUMP_KEYS else 'start' if event.key in self.START_KEYS else None
+                if action:
+                    (self.press if event.type == pygame.KEYDOWN else self.release)(action, ('key', event.key))
         elif event.type in (getattr(pygame, 'CONTROLLERBUTTONDOWN', -1), getattr(pygame, 'CONTROLLERBUTTONUP', -1)):
             action = {pygame.CONTROLLER_BUTTON_A: 'jump', pygame.CONTROLLER_BUTTON_DPAD_UP: 'jump',
                       pygame.CONTROLLER_BUTTON_START: 'start', pygame.CONTROLLER_BUTTON_BACK: 'back'}.get(event.button)
@@ -289,9 +293,8 @@ class Controls:
 
     def _handle_raw_joystick(self, event):
         if event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP):
-            action = {0: 'jump', 3: 'jump', 6: 'back', 8: 'back'}.get(event.button)
-            if action is None and event.button >= 7:
-                action = 'start'
+            # common D-input arcade pad; adjust these indices for your cabinet (see SKILL.md §4)
+            action = {0: 'jump', 1: 'jump', 3: 'jump', 8: 'back', 9: 'start'}.get(event.button)
             if action:
                 source = ('joystick', event.instance_id, event.button)
                 (self.press if event.type == pygame.JOYBUTTONDOWN else self.release)(action, source)
